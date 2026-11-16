@@ -18,7 +18,19 @@ navLinks?.querySelectorAll('a').forEach((link) => {
 
 const form = document.querySelector('#contact-form');
 const status = document.querySelector('#form-status');
+const endpoint = form?.dataset.formspreeEndpoint?.trim() ?? '';
 const fields = ['name', 'email', 'message'];
+const messageUrlPattern = /(?:https?:\/\/|www\.)\S+|\b[a-z0-9-]+\.(?:com|net|org|io|co|info|biz|xyz|me|app|dev|ke)\b/i;
+const cooldownKey = 'portfolio-contact-last-success';
+const cooldownMs = 60 * 60 * 1000;
+const turnstileBox = form?.querySelector('.cf-turnstile');
+if (turnstileBox?.dataset.sitekey?.trim()) {
+  const turnstileScript = document.createElement('script');
+  turnstileScript.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+  turnstileScript.async = true;
+  turnstileScript.defer = true;
+  document.head.append(turnstileScript);
+}
 
 function showError(field, message) {
   const input = document.querySelector(`#${field}`);
@@ -35,7 +47,7 @@ function validateField(field) {
   const input = document.querySelector(`#${field}`);
   const value = input?.value.trim() ?? '';
   if (!value) {
-    showError(field, 'Please enter your ' + (field === 'name' ? 'name.' : field === 'email' ? 'email address.' : 'message.'));
+    showError(field, `Please enter your ${field === 'name' ? 'name' : field === 'email' ? 'email address' : 'message'}.`);
     return false;
   }
   if (field === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
@@ -46,6 +58,10 @@ function validateField(field) {
     showError(field, 'Please add a little more detail (at least 10 characters).');
     return false;
   }
+  if (field === 'message' && messageUrlPattern.test(value)) {
+    showError(field, 'Please remove web links from your message and try again.');
+    return false;
+  }
   showError(field, '');
   return true;
 }
@@ -53,18 +69,61 @@ function validateField(field) {
 fields.forEach((field) => {
   document.querySelector(`#${field}`)?.addEventListener('input', () => {
     validateField(field);
-    if (status) status.textContent = 'This form validates your details in the browser; it does not send messages yet.';
+    if (status) status.textContent = '';
   });
 });
 
-form?.addEventListener('submit', (event) => {
+form?.addEventListener('submit', async (event) => {
   event.preventDefault();
-  const results = fields.map(validateField);
-  if (results.every(Boolean)) {
-    if (status) status.textContent = 'Your details look good. The form is not connected to a message service yet, so please contact me by phone or WhatsApp.';
-  } else {
-    status.textContent = 'Please correct the highlighted fields.';
+  const valid = fields.map(validateField).every(Boolean);
+  if (!valid) {
+    if (status) status.textContent = 'Please correct the highlighted fields.';
     document.querySelector('[aria-invalid="true"]')?.focus();
+    return;
+  }
+  if (form.querySelector('[name="_gotcha"]')?.value) return;
+  if (!endpoint) {
+    if (status) status.textContent = 'The contact form is not configured yet. Please email me directly.';
+    return;
+  }
+  const siteKey = turnstileBox?.dataset.sitekey?.trim() ?? '';
+  if (!siteKey) {
+    if (status) status.textContent = 'The contact form is being secured. Please email me directly for now.';
+    return;
+  }
+  const turnstileToken = form.querySelector('[name="cf-turnstile-response"]')?.value;
+  if (!turnstileToken) {
+    if (status) status.textContent = 'Please complete the security check and try again.';
+    return;
+  }
+  let lastSentAt = 0;
+  try { lastSentAt = Number(localStorage.getItem(cooldownKey) || 0); } catch { /* Browser storage may be disabled. */ }
+  const waitMs = cooldownMs - (Date.now() - lastSentAt);
+  if (waitMs > 0) {
+    const minutes = Math.ceil(waitMs / 60000);
+    if (status) status.textContent = `A message was already sent from this browser recently. Please try again in about ${minutes} minute${minutes === 1 ? '' : 's'}.`;
+    return;
+  }
+
+  const submitButton = form.querySelector('button[type="submit"]');
+  if (submitButton) submitButton.disabled = true;
+  if (status) status.textContent = 'Sending your message…';
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      body: new FormData(form),
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) throw new Error('Form submission failed');
+    try { localStorage.setItem(cooldownKey, String(Date.now())); } catch { /* Keep the successful submission even when storage is disabled. */ }
+    form.reset();
+    fields.forEach((field) => showError(field, ''));
+    if (status) status.textContent = 'Thank you. Your message has been sent.';
+  } catch {
+    if (status) status.textContent = 'Your message could not be sent. Please try again or email me directly.';
+  } finally {
+    if (submitButton) submitButton.disabled = false;
   }
 });
 
@@ -75,7 +134,8 @@ if ('IntersectionObserver' in window) {
     entries.forEach((entry) => {
       if (!entry.isIntersecting) return;
       sectionLinks.forEach((link) => {
-        const active = link.getAttribute('href') === `#${entry.target.id}`;
+        const target = link.getAttribute('href')?.split('#').pop();
+        const active = target === entry.target.id && link.href.includes('#');
         link.classList.toggle('text-gold', active);
         link.classList.toggle('font-semibold', active);
         if (active) link.setAttribute('aria-current', 'location');
